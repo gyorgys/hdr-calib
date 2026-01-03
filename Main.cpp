@@ -2,7 +2,10 @@
 #include <d3d11.h>
 #include <dxgi1_4.h>
 #include <d2d1_1.h>
+#include <dwrite.h>
+#include <xinput.h>
 #include <wrl/client.h>
+#include <string>
 
 using Microsoft::WRL::ComPtr;
 
@@ -16,9 +19,12 @@ ComPtr<ID2D1DeviceContext> g_d2dContext;
 ComPtr<ID2D1Bitmap1> g_d2dTargetBitmap;
 ComPtr<ID2D1SolidColorBrush> g_whiteBrush;
 ComPtr<ID2D1SolidColorBrush> g_innerBrush;
+ComPtr<ID2D1SolidColorBrush> g_textBrush;
+ComPtr<IDWriteFactory> g_dwriteFactory;
+ComPtr<IDWriteTextFormat> g_textFormat;
 
 HWND g_hwnd = nullptr;
-float g_innerBrightness = 400.0f; // nits
+float g_innerBrightness = 800.0f; // nits
 int g_screenWidth = 0;
 int g_screenHeight = 0;
 
@@ -26,6 +32,8 @@ int g_screenHeight = 0;
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 bool InitD3D();
 bool InitD2D();
+void ProcessInput();
+void UpdateInnerBrightness(float newBrightness);
 void Render();
 void CleanUp();
 
@@ -83,6 +91,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
         }
         else
         {
+            ProcessInput();
             Render();
         }
     }
@@ -108,6 +117,58 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return DefWindowProc(hwnd, msg, wParam, lParam);
     }
     return 0;
+}
+
+void ProcessInput()
+{
+    static bool leftWasPressed = false;
+    static bool rightWasPressed = false;
+    static bool bWasPressed = false;
+
+    // Check keyboard input
+    bool leftPressed = (GetAsyncKeyState(VK_LEFT) & 0x8000) != 0;
+    bool rightPressed = (GetAsyncKeyState(VK_RIGHT) & 0x8000) != 0;
+
+    // Check gamepad input
+    XINPUT_STATE state = {};
+    if (XInputGetState(0, &state) == ERROR_SUCCESS)
+    {
+        // D-Pad
+        leftPressed = leftPressed || (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT);
+        rightPressed = rightPressed || (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT);
+
+        // Left stick
+        const SHORT STICK_THRESHOLD = 16000;
+        if (state.Gamepad.sThumbLX < -STICK_THRESHOLD)
+            leftPressed = true;
+        if (state.Gamepad.sThumbLX > STICK_THRESHOLD)
+            rightPressed = true;
+
+        // B button to quit
+        bool bPressed = (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
+        if (bPressed && !bWasPressed)
+            PostQuitMessage(0);
+        bWasPressed = bPressed;
+    }
+
+    // Handle brightness adjustment with edge detection
+    if (leftPressed && !leftWasPressed)
+        UpdateInnerBrightness(g_innerBrightness - 50.0f);
+    if (rightPressed && !rightWasPressed)
+        UpdateInnerBrightness(g_innerBrightness + 50.0f);
+
+    leftWasPressed = leftPressed;
+    rightWasPressed = rightPressed;
+}
+
+void UpdateInnerBrightness(float newBrightness)
+{
+    // Clamp to 0-10000 range
+    g_innerBrightness = max(0.0f, min(10000.0f, newBrightness));
+
+    // Update the brush color
+    float innerScRGB = g_innerBrightness / 80.0f;
+    g_innerBrush->SetColor(D2D1::ColorF(innerScRGB, innerScRGB, innerScRGB, 1.0f));
 }
 
 bool InitD3D()
@@ -266,6 +327,46 @@ bool InitD2D()
         &g_innerBrush
     );
 
+    if (FAILED(hr))
+        return false;
+
+    // Create dark blue brush for text
+    hr = g_d2dContext->CreateSolidColorBrush(
+        D2D1::ColorF(0.0f, 0.0f, 0.5f, 1.0f),
+        &g_textBrush
+    );
+
+    if (FAILED(hr))
+        return false;
+
+    // Create DirectWrite factory
+    hr = DWriteCreateFactory(
+        DWRITE_FACTORY_TYPE_SHARED,
+        __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown**>(g_dwriteFactory.GetAddressOf())
+    );
+
+    if (FAILED(hr))
+        return false;
+
+    // Create text format
+    hr = g_dwriteFactory->CreateTextFormat(
+        L"Arial",
+        nullptr,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL,
+        24.0f,
+        L"en-us",
+        &g_textFormat
+    );
+
+    if (FAILED(hr))
+        return false;
+
+    g_textFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    g_textFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+
     return SUCCEEDED(hr);
 }
 
@@ -277,22 +378,39 @@ void Render()
     g_d2dContext->Clear(D2D1::ColorF(D2D1::ColorF::Black));
 
     // Draw white rectangle in the center
-    float rectWidth = 400.0f;
-    float rectHeight = 300.0f;
+    float rectWidth = g_screenHeight / 6.0f;
+    float rectHeight = rectWidth;
     float x = (g_screenWidth - rectWidth) / 2.0f;
     float y = (g_screenHeight - rectHeight) / 2.0f;
 
     D2D1_RECT_F rect = D2D1::RectF(x, y, x + rectWidth, y + rectHeight);
     g_d2dContext->FillRectangle(&rect, g_whiteBrush.Get());
 
-    // Draw inner rectangle (1/3 size) centered in the outer rectangle
-    float innerWidth = rectWidth / 3.0f;
-    float innerHeight = rectHeight / 3.0f;
+    // Draw inner rectangle (1/2 size) centered in the outer rectangle
+    float innerWidth = rectWidth / 2.0f;
+    float innerHeight = rectHeight / 2.0f;
     float innerX = x + (rectWidth - innerWidth) / 2.0f;
     float innerY = y + (rectHeight - innerHeight) / 2.0f;
 
     D2D1_RECT_F innerRect = D2D1::RectF(innerX, innerY, innerX + innerWidth, innerY + innerHeight);
     g_d2dContext->FillRectangle(&innerRect, g_innerBrush.Get());
+
+    // Draw brightness text below large rectangle (same gap as to inner rectangle)
+    float gap = (rectWidth - innerWidth) / 2.0f;
+    std::wstring text = std::to_wstring(static_cast<int>(g_innerBrightness)) + L" nits";
+    D2D1_RECT_F textRect = D2D1::RectF(
+        x,
+        y + rectHeight + gap,
+        x + rectWidth,
+        y + rectHeight + gap + 40.0f
+    );
+    g_d2dContext->DrawText(
+        text.c_str(),
+        static_cast<UINT32>(text.length()),
+        g_textFormat.Get(),
+        &textRect,
+        g_textBrush.Get()
+    );
 
     g_d2dContext->EndDraw();
 
@@ -302,6 +420,9 @@ void Render()
 
 void CleanUp()
 {
+    g_textFormat.Reset();
+    g_dwriteFactory.Reset();
+    g_textBrush.Reset();
     g_innerBrush.Reset();
     g_whiteBrush.Reset();
     g_d2dTargetBitmap.Reset();

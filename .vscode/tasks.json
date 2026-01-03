@@ -28,6 +28,8 @@
                 "d3d11.lib",
                 "dxgi.lib",
                 "d2d1.lib",
+                "dwrite.lib",
+                "xinput.lib",
                 "user32.lib",
                 "gdi32.lib"
             ],
