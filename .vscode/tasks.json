@@ -21,7 +21,8 @@
                 "/EHsc",
                 "/W3",
                 "/std:c++17",
-                "/Fe:${workspaceFolder}\\hdr-calib.exe",
+                "/Fo:${workspaceFolder}\\bin\\",
+                "/Fe:${workspaceFolder}\\bin\\hdr-calib.exe",
                 "${workspaceFolder}\\Main.cpp",
                 "/link",
                 "d3d11.lib",
@@ -35,7 +36,7 @@
             ],
             "group": {
                 "kind": "build",
-                "isDefault": false
+                "isDefault": true
             }
         },
         {
