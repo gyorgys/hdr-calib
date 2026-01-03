@@ -9,6 +9,12 @@
 
 using Microsoft::WRL::ComPtr;
 
+enum class BrightnessMode
+{
+    MaxWhite,  // Outer rect shown, 0-10000 nits, 10 nit increments
+    MinBlack   // Outer rect hidden, 0-1 nits, 0.01 nit increments
+};
+
 // Global variables
 ComPtr<ID3D11Device> g_d3dDevice;
 ComPtr<ID3D11DeviceContext> g_d3dContext;
@@ -24,7 +30,9 @@ ComPtr<IDWriteFactory> g_dwriteFactory;
 ComPtr<IDWriteTextFormat> g_textFormat;
 
 HWND g_hwnd = nullptr;
-float g_innerBrightness = 800.0f; // nits
+BrightnessMode g_mode = BrightnessMode::MaxWhite;
+float g_brightnessMaxWhite = 800.0f; // nits (0-10000)
+float g_brightnessMinBlack = 0.1f;   // nits (0-1)
 int g_screenWidth = 0;
 int g_screenHeight = 0;
 
@@ -33,7 +41,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 bool InitD3D();
 bool InitD2D();
 void ProcessInput();
-void UpdateInnerBrightness(float newBrightness);
+float GetCurrentBrightness();
+void SetCurrentBrightness(float brightness);
+float GetIncrement();
+float GetMaxBrightness();
+void ToggleMode();
 void Render();
 void CleanUp();
 
@@ -119,15 +131,62 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
+float GetCurrentBrightness()
+{
+    return g_mode == BrightnessMode::MaxWhite ? g_brightnessMaxWhite : g_brightnessMinBlack;
+}
+
+void SetCurrentBrightness(float brightness)
+{
+    if (g_mode == BrightnessMode::MaxWhite)
+        g_brightnessMaxWhite = brightness;
+    else
+        g_brightnessMinBlack = brightness;
+    
+    // Update the brush color
+    float scRGB = brightness / 80.0f;
+    g_innerBrush->SetColor(D2D1::ColorF(scRGB, scRGB, scRGB, 1.0f));
+}
+
+float GetIncrement()
+{
+    return g_mode == BrightnessMode::MaxWhite ? 10.0f : 0.01f;
+}
+
+float GetMaxBrightness()
+{
+    return g_mode == BrightnessMode::MaxWhite ? 10000.0f : 1.0f;
+}
+
+void ToggleMode()
+{
+    g_mode = (g_mode == BrightnessMode::MaxWhite) ? BrightnessMode::MinBlack : BrightnessMode::MaxWhite;
+    
+    // Update brush to reflect current mode's brightness
+    float scRGB = GetCurrentBrightness() / 80.0f;
+    g_innerBrush->SetColor(D2D1::ColorF(scRGB, scRGB, scRGB, 1.0f));
+}
+
 void ProcessInput()
 {
     static bool leftWasPressed = false;
     static bool rightWasPressed = false;
     static bool bWasPressed = false;
+    static bool spaceWasPressed = false;
+    static DWORD leftPressStartTime = 0;
+    static DWORD rightPressStartTime = 0;
+    static DWORD lastRepeatTime = 0;
+
+    DWORD currentTime = GetTickCount();
+    const DWORD REPEAT_DELAY = 1500; // 1.5 seconds
+    const DWORD REPEAT_INTERVAL = 200; // 0.2 seconds (5x per second)
+    const float INCREMENT = GetIncrement();
+    const float MAX_BRIGHTNESS = GetMaxBrightness();
 
     // Check keyboard input
     bool leftPressed = (GetAsyncKeyState(VK_LEFT) & 0x8000) != 0;
     bool rightPressed = (GetAsyncKeyState(VK_RIGHT) & 0x8000) != 0;
+    bool spacePressed = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
 
     // Check gamepad input
     XINPUT_STATE state = {};
@@ -149,26 +208,65 @@ void ProcessInput()
         if (bPressed && !bWasPressed)
             PostQuitMessage(0);
         bWasPressed = bPressed;
+
+        // X button to toggle outer rectangle
+        bool xPressed = (state.Gamepad.wButtons & XINPUT_GAMEPAD_X) != 0;
+        spacePressed = spacePressed || xPressed;
     }
 
-    // Handle brightness adjustment with edge detection
-    if (leftPressed && !leftWasPressed)
-        UpdateInnerBrightness(g_innerBrightness - 50.0f);
-    if (rightPressed && !rightWasPressed)
-        UpdateInnerBrightness(g_innerBrightness + 50.0f);
+    // Handle space/X button to toggle mode
+    if (spacePressed && !spaceWasPressed)
+        ToggleMode();
+    spaceWasPressed = spacePressed;
+
+    // Handle left input
+    if (leftPressed)
+    {
+        if (!leftWasPressed)
+        {
+            // Initial press
+            float newBrightness = max(0.0f, GetCurrentBrightness() - INCREMENT);
+            SetCurrentBrightness(newBrightness);
+            leftPressStartTime = currentTime;
+            lastRepeatTime = currentTime;
+        }
+        else if (currentTime - leftPressStartTime >= REPEAT_DELAY)
+        {
+            // Repeat after delay
+            if (currentTime - lastRepeatTime >= REPEAT_INTERVAL)
+            {
+                float newBrightness = max(0.0f, GetCurrentBrightness() - INCREMENT);
+                SetCurrentBrightness(newBrightness);
+                lastRepeatTime = currentTime;
+            }
+        }
+    }
+
+    // Handle right input
+    if (rightPressed)
+    {
+        if (!rightWasPressed)
+        {
+            // Initial press
+            float newBrightness = min(MAX_BRIGHTNESS, GetCurrentBrightness() + INCREMENT);
+            SetCurrentBrightness(newBrightness);
+            rightPressStartTime = currentTime;
+            lastRepeatTime = currentTime;
+        }
+        else if (currentTime - rightPressStartTime >= REPEAT_DELAY)
+        {
+            // Repeat after delay
+            if (currentTime - lastRepeatTime >= REPEAT_INTERVAL)
+            {
+                float newBrightness = min(MAX_BRIGHTNESS, GetCurrentBrightness() + INCREMENT);
+                SetCurrentBrightness(newBrightness);
+                lastRepeatTime = currentTime;
+            }
+        }
+    }
 
     leftWasPressed = leftPressed;
     rightWasPressed = rightPressed;
-}
-
-void UpdateInnerBrightness(float newBrightness)
-{
-    // Clamp to 0-10000 range
-    g_innerBrightness = max(0.0f, min(10000.0f, newBrightness));
-
-    // Update the brush color
-    float innerScRGB = g_innerBrightness / 80.0f;
-    g_innerBrush->SetColor(D2D1::ColorF(innerScRGB, innerScRGB, innerScRGB, 1.0f));
 }
 
 bool InitD3D()
@@ -321,7 +419,7 @@ bool InitD2D()
         return false;
 
     // Create inner brush with variable brightness
-    float innerScRGB = g_innerBrightness / 80.0f;
+    float innerScRGB = GetCurrentBrightness() / 80.0f;
     hr = g_d2dContext->CreateSolidColorBrush(
         D2D1::ColorF(innerScRGB, innerScRGB, innerScRGB, 1.0f),
         &g_innerBrush
@@ -383,8 +481,11 @@ void Render()
     float x = (g_screenWidth - rectWidth) / 2.0f;
     float y = (g_screenHeight - rectHeight) / 2.0f;
 
-    D2D1_RECT_F rect = D2D1::RectF(x, y, x + rectWidth, y + rectHeight);
-    g_d2dContext->FillRectangle(&rect, g_whiteBrush.Get());
+    if (g_mode == BrightnessMode::MaxWhite)
+    {
+        D2D1_RECT_F rect = D2D1::RectF(x, y, x + rectWidth, y + rectHeight);
+        g_d2dContext->FillRectangle(&rect, g_whiteBrush.Get());
+    }
 
     // Draw inner rectangle (1/2 size) centered in the outer rectangle
     float innerWidth = rectWidth / 2.0f;
@@ -397,7 +498,13 @@ void Render()
 
     // Draw brightness text below large rectangle (same gap as to inner rectangle)
     float gap = (rectWidth - innerWidth) / 2.0f;
-    std::wstring text = std::to_wstring(static_cast<int>(g_innerBrightness)) + L" nits";
+    float brightness = GetCurrentBrightness();
+    std::wstring text;
+    if (g_mode == BrightnessMode::MaxWhite)
+        text = std::to_wstring(static_cast<int>(brightness)) + L" nits";
+    else
+        text = std::to_wstring(brightness).substr(0, 4) + L" nits";
+    
     D2D1_RECT_F textRect = D2D1::RectF(
         x,
         y + rectHeight + gap,
